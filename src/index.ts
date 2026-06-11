@@ -127,9 +127,25 @@ export const getNearbyDrivers = functions.https.onRequest(async (req, res) => {
       .where("is_available", "==", true)
       .get();
 
+    // Build set of driver user_ids who are currently on an active trip
+    const activeStatuses = ["driver_arriving", "driver_arrived", "in_progress", "pending_driver"];
+    const activeRidesSnaps = await Promise.all(
+      activeStatuses.map(s => db.collection("rides").where("status", "==", s).get())
+    );
+    const busyDriverIds = new Set<string>();
+    activeRidesSnaps.forEach(snap => {
+      snap.forEach(d => {
+        const driverId = d.data().driver_id;
+        if (driverId) busyDriverIds.add(driverId);
+      });
+    });
+
     const drivers: any[] = [];
     driversSnap.forEach((doc) => {
       const d = doc.data();
+      const driverUserId = d.user_id || doc.id;
+      // Skip drivers who are currently on an active trip
+      if (busyDriverIds.has(driverUserId) || busyDriverIds.has(doc.id)) return;
       if (d.current_lat && d.current_lng) {
         const dist = haversineDistance(lat, lng, d.current_lat, d.current_lng);
         if (dist <= radius) {
@@ -646,9 +662,25 @@ export const suggestNearestDriver = functions.https.onRequest(async (req, res) =
       .where("is_available", "==", true)
       .get();
 
+    // Build set of driver user_ids who are currently on an active trip
+    const activeStatuses = ["driver_arriving", "driver_arrived", "in_progress", "pending_driver"];
+    const activeRidesSnaps = await Promise.all(
+      activeStatuses.map(s => db.collection("rides").where("status", "==", s).get())
+    );
+    const busyDriverIds = new Set<string>();
+    activeRidesSnaps.forEach(snap => {
+      snap.forEach(d => {
+        const driverId = d.data().driver_id;
+        if (driverId) busyDriverIds.add(driverId);
+      });
+    });
+
     const suggestions: any[] = [];
     driversSnap.forEach((doc) => {
       const d = doc.data();
+      const driverUserId = d.user_id || doc.id;
+      // Skip drivers who are currently on an active trip
+      if (busyDriverIds.has(driverUserId) || busyDriverIds.has(doc.id)) return;
       if (d.current_lat && d.current_lng) {
         const dist = haversineDistance(pickup_lat, pickup_lng, d.current_lat, d.current_lng);
         const eta = Math.max(1, Math.round(dist / 1000 / 30 * 60));
