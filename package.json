@@ -16,10 +16,11 @@
   },
   "main": "lib/index.js",
   "dependencies": {
-    "firebase-admin": "^12.0.0",
-    "firebase-functions": "^5.0.0",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^7.2.5",
+    "nodemailer": "^8.0.10",
     "twilio": "^5.0.0",
     "web-push": "^3.6.7"
   },
@@ -30,5 +31,20 @@
     "eslint-config-google": "^0.14.0",
     "typescript": "^5.4.0"
   },
-  "private": true
+  "private": true,
+  "version": "1.0.0",
+  "directories": {
+    "lib": "lib"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yawgad23/hy3n-functions.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/yawgad23/hy3n-functions/issues"
+  },
+  "homepage": "https://github.com/yawgad23/hy3n-functions#readme"
 }

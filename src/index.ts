@@ -1,4 +1,4 @@
-import * as functions from "firebase-functions";
+import * as functions from "firebase-functions/v1";
 import * as admin from "firebase-admin";
 import axios from "axios";
 import * as crypto from "crypto";
@@ -172,7 +172,7 @@ export const calculateDistance = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY || functions.config().google?.maps_api_key;
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
     if (apiKey) {
       try {
@@ -209,7 +209,97 @@ export const calculateDistance = functions.https.onRequest(async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 4. getGoogleMapsRoute
+// 4. calculateFare
+// Calculates fare based on distance, duration, and vehicle category using FareConfig
+// ─────────────────────────────────────────────
+export const calculateFare = functions.https.onRequest(async (req, res) => {
+  if (handleOptions(req, res)) return;
+  setCors(req, res);
+  try {
+    const { distance_km, duration_minutes, category, lat, lng } = req.body;
+    if (!distance_km || !category) {
+      res.status(400).json({ error: "distance_km and category required" });
+      return;
+    }
+
+    // Map rider categories to admin vehicle types
+    const categoryToVehicleType: Record<string, string> = {
+      standard: "Sedan",
+      comfort: "SUV",
+      kantanka: "SUV",
+      executive: "Minivan",
+      okada: "Motorcycle",
+      express_delivery: "Tricycle"
+    };
+
+    const vehicleType = categoryToVehicleType[category] || "Sedan";
+    
+    // Fetch FareConfig from Firestore
+    const fareConfigSnap = await db.collection("FareConfig").where("vehicle_type", "==", vehicleType).limit(1).get();
+    
+    let cfg = {
+      base_fare: 5,
+      per_km_rate: 3.5,
+      minimum_fare: 10,
+      surge_multiplier: 1,
+      peak_multiplier: 1.3,
+      night_multiplier: 1.2,
+      traffic_multiplier: 1.5,
+      peak_start_hour: 7,
+      peak_end_hour: 9,
+      peak_start_hour_2: 17,
+      peak_end_hour_2: 19,
+      night_start_hour: 22,
+      night_end_hour: 5,
+      traffic_enabled: false
+    };
+
+    if (!fareConfigSnap.empty) {
+      cfg = { ...cfg, ...fareConfigSnap.docs[0].data() };
+    }
+
+    // Calculate dynamic multiplier
+    const now = new Date();
+    const hour = now.getHours();
+    const inRange = (h: number, start: number, end: number) =>
+      start <= end ? h >= start && h < end : h >= start || h < end;
+
+    const isPeak = inRange(hour, cfg.peak_start_hour, cfg.peak_end_hour) ||
+                   inRange(hour, cfg.peak_start_hour_2, cfg.peak_end_hour_2);
+    const isNight = inRange(hour, cfg.night_start_hour, cfg.night_end_hour);
+    const isTraffic = cfg.traffic_enabled;
+
+    let multiplier = cfg.surge_multiplier || 1;
+    if (isPeak) multiplier = Math.max(multiplier, cfg.peak_multiplier);
+    if (isNight) multiplier = Math.max(multiplier, cfg.night_multiplier);
+    if (isTraffic) multiplier = Math.max(multiplier, cfg.traffic_multiplier);
+
+    // Final calculation
+    const subtotal = (cfg.base_fare + (cfg.per_km_rate * distance_km)) * multiplier;
+    const finalFare = Math.max(subtotal, cfg.minimum_fare);
+
+    // Rounding: .50 or less down, > .50 up
+    const roundedFare = Math.floor(finalFare + 0.49);
+
+    res.json({
+      fare: roundedFare,
+      breakdown: {
+        base: cfg.base_fare,
+        distance_fare: cfg.per_km_rate * distance_km,
+        multiplier,
+        is_peak: isPeak,
+        is_night: isNight,
+        is_traffic: isTraffic
+      }
+    });
+  } catch (err: any) {
+    console.error("calculateFare error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// 5. getGoogleMapsRoute
 // Returns route data from Google Maps Directions API
 // ─────────────────────────────────────────────
 export const getGoogleMapsRoute = functions.https.onRequest(async (req, res) => {
@@ -222,7 +312,7 @@ export const getGoogleMapsRoute = functions.https.onRequest(async (req, res) => 
       return;
     }
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY || functions.config().google?.maps_api_key;
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
     if (apiKey) {
       const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&key=${apiKey}`;
@@ -266,7 +356,7 @@ export const placesAutocomplete = functions.https.onRequest(async (req, res) => 
       return;
     }
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY || functions.config().google?.maps_api_key;
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
     if (apiKey) {
       const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(query)}&key=${apiKey}&language=en&components=country:gh`;
@@ -297,7 +387,7 @@ export const placeDetails = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY || functions.config().google?.maps_api_key;
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
     if (apiKey) {
       const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=name,formatted_address,geometry&key=${apiKey}`;
@@ -328,7 +418,7 @@ export const processMoMoPayment = functions.https.onRequest(async (req, res) => 
       return;
     }
 
-    const paystackKey = process.env.PAYSTACK_SECRET_KEY || functions.config().paystack?.secret_key;
+    const paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET_KEY;
 
     if (paystackKey) {
       // Use Paystack Mobile Money API
@@ -404,7 +494,7 @@ export const processMoMoWithdrawal = functions.https.onRequest(async (req, res) 
       return;
     }
 
-    const paystackKey = process.env.PAYSTACK_SECRET_KEY || functions.config().paystack?.secret_key;
+    const paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET_KEY;
 
     if (paystackKey) {
       // Create transfer recipient first
@@ -491,7 +581,7 @@ export const processCardPayment = functions.https.onRequest(async (req, res) => 
       return;
     }
 
-    const paystackKey = process.env.PAYSTACK_SECRET_KEY || functions.config().paystack?.secret_key;
+    const paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET_KEY;
 
     if (paystackKey && card_token && !card_token.startsWith("tok_")) {
       const response = await axios.post(
@@ -669,7 +759,7 @@ export const triggerSOS = functions.https.onRequest(async (req, res) => {
     }
 
     // TODO: Send SMS to emergency contacts via Twilio when configured
-    const twilioSid = process.env.TWILIO_ACCOUNT_SID || functions.config().twilio?.account_sid;
+    const twilioSid = process.env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID;
     if (twilioSid) {
       // Twilio SMS would go here
       console.log("SOS triggered — Twilio SMS would be sent here");
@@ -798,9 +888,9 @@ export const sendPhoneLoginOtp = functions.https.onRequest(async (req, res) => {
       created_at: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    const twilioSid = process.env.TWILIO_ACCOUNT_SID || functions.config().twilio?.account_sid;
-    const twilioToken = process.env.TWILIO_AUTH_TOKEN || functions.config().twilio?.auth_token;
-    const twilioPhone = process.env.TWILIO_PHONE || functions.config().twilio?.phone;
+    const twilioSid = process.env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID;
+    const twilioToken = process.env.TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN;
+    const twilioPhone = process.env.TWILIO_PHONE || process.env.TWILIO_PHONE;
 
     if (twilioSid && twilioToken && twilioPhone) {
       const twilio = require("twilio")(twilioSid, twilioToken);
@@ -913,7 +1003,7 @@ export const getVapidPublicKey = functions.https.onRequest(async (req, res) => {
   if (handleOptions(req, res)) return;
   setCors(req, res);
   try {
-    const vapidPublicKey = process.env.VAPID_PUBLIC_KEY || functions.config().vapid?.public_key;
+    const vapidPublicKey = process.env.VAPID_PUBLIC_KEY || process.env.VAPID_PUBLIC_KEY;
     if (!vapidPublicKey) {
       res.json({ vapidPublicKey: null, message: "VAPID not configured" });
       return;
@@ -1042,3 +1132,473 @@ function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
   const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FCM Push Notifications — Ride Status Changes
+// Fires whenever a ride document is updated in Firestore.
+// Sends a push notification to the rider's device via FCM.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface RideData {
+  status?: string;
+  user_id?: string;
+  rider_id?: string;
+  driver_name?: string;
+  vehicle_color?: string;
+  vehicle_make?: string;
+  vehicle_model?: string;
+  license_plate?: string;
+  fare_estimate?: number;
+  final_fare?: number;
+  [key: string]: any;
+}
+
+const RIDE_STATUS_NOTIFICATIONS: Record<string, { title: string; body: string | ((r: RideData) => string); tag: string }> = {
+  pending_driver: {
+    title: "Driver Found!",
+    body: "A driver has been found for your trip. Waiting for confirmation...",
+    tag: "hy3n-driver-found",
+  },
+  matched: {
+    title: "Driver Assigned!",
+    body: (r: RideData) => {
+      const name = r.driver_name || "Your driver";
+      const vehicle = [r.vehicle_color, r.vehicle_make, r.vehicle_model].filter(Boolean).join(" ");
+      const plate = r.license_plate ? ` (${r.license_plate})` : "";
+      return vehicle ? `${name} is heading to you in a ${vehicle}${plate}.` : `${name} is on the way.`;
+    },
+    tag: "hy3n-matched",
+  },
+  driver_arriving: {
+    title: "Driver is on the Way!",
+    body: (r: RideData) => {
+      const name = r.driver_name || "Your driver";
+      const vehicle = [r.vehicle_color, r.vehicle_make, r.vehicle_model].filter(Boolean).join(" ");
+      const plate = r.license_plate ? ` (${r.license_plate})` : "";
+      return vehicle ? `${name} is heading to you in a ${vehicle}${plate}. Be ready!` : `${name} is heading to your pickup. Be ready!`;
+    },
+    tag: "hy3n-arriving",
+  },
+  driver_arrived: {
+    title: "Driver Has Arrived!",
+    body: (r: RideData) => `${r.driver_name || "Your driver"} is waiting at your pickup. Hurry — waiting fees apply after 3 minutes.`,
+    tag: "hy3n-arrived",
+  },
+  in_progress: {
+    title: "Trip Started!",
+    body: "You're on your way. Sit back and enjoy the ride.",
+    tag: "hy3n-in-progress",
+  },
+  completed: {
+    title: "Trip Complete!",
+    body: (r: RideData) => {
+      const fare = r.final_fare || r.fare_estimate;
+      return fare ? `You've arrived. Total fare: GH₵${Math.round(fare)}. Rate your driver!` : "You've arrived safely. Rate your driver!";
+    },
+    tag: "hy3n-completed",
+  },
+  cancelled: {
+    title: "Ride Cancelled",
+    body: "Your ride has been cancelled.",
+    tag: "hy3n-cancelled",
+  },
+};
+
+export const onRideStatusChange = functions.firestore
+  .document("rides/{rideId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() as RideData;
+    const after = change.after.data() as RideData;
+    const rideId = context.params.rideId;
+
+    const oldStatus = before?.status;
+    const newStatus = after?.status;
+
+    if (!newStatus || oldStatus === newStatus) return null;
+    console.log(`[FCM] Ride ${rideId}: ${oldStatus} → ${newStatus}`);
+
+    const notifConfig = RIDE_STATUS_NOTIFICATIONS[newStatus];
+    if (!notifConfig) return null;
+
+    const riderId = after.user_id || after.rider_id;
+    if (!riderId) { console.warn(`[FCM] No rider ID on ride ${rideId}`); return null; }
+
+    // ── Deduplication guard ──────────────────────────────────────────────────
+    // Firestore triggers can fire twice for the same write (especially on cold starts).
+    // We use a short-lived dedup doc to ensure we only send one notification per
+    // (rideId, status) transition. TTL is 60 seconds.
+    const dedupId = `${rideId}_${newStatus}`;
+    const dedupRef = db.collection("_fcm_dedup").doc(dedupId);
+    try {
+      await db.runTransaction(async (tx) => {
+        const dedupDoc = await tx.get(dedupRef);
+        if (dedupDoc.exists) {
+          const sentAt = dedupDoc.data()?.sent_at?.toMillis?.() || 0;
+          if (Date.now() - sentAt < 60000) {
+            throw new Error("DUPLICATE");
+          }
+        }
+        tx.set(dedupRef, { sent_at: admin.firestore.FieldValue.serverTimestamp(), ride_id: rideId, status: newStatus });
+      });
+    } catch (dedupErr: any) {
+      if (dedupErr.message === "DUPLICATE") {
+        console.log(`[FCM] Dedup: skipping duplicate notification for ${rideId} ${newStatus}`);
+        return null;
+      }
+      // If dedup fails for other reasons, continue anyway (better to send than miss)
+      console.warn("[FCM] Dedup check failed:", dedupErr.message);
+    }
+
+    let fcmToken: string | null = null;
+    let profileDocId: string | null = null;
+    try {
+      const snap = await db.collection("rider_profiles").where("user_id", "==", riderId).limit(1).get();
+      if (snap.empty) { console.warn(`[FCM] No rider profile for ${riderId}`); return null; }
+      fcmToken = snap.docs[0].data().fcm_token || null;
+      profileDocId = snap.docs[0].id;
+    } catch (err) { console.error("[FCM] Profile fetch error:", err); return null; }
+
+    if (!fcmToken) { console.warn(`[FCM] No FCM token for rider ${riderId}`); return null; }
+
+    const title = notifConfig.title;
+    const body = typeof notifConfig.body === "function" ? notifConfig.body(after) : notifConfig.body;
+    const tag = notifConfig.tag;
+
+    const message: admin.messaging.Message = {
+      token: fcmToken,
+      notification: { title, body },
+      data: {
+        ride_id: rideId,
+        status: newStatus,
+        tag,
+        action_url: "/",
+        driver_name: after.driver_name || "",
+        vehicle_color: after.vehicle_color || "",
+        vehicle_make: after.vehicle_make || "",
+        vehicle_model: after.vehicle_model || "",
+        license_plate: after.license_plate || "",
+      },
+      android: {
+        priority: "high",
+        notification: { channelId: "hy3n_rides", priority: "high", defaultVibrateTimings: true, defaultSound: true, tag },
+      },
+      apns: {
+        payload: { aps: { alert: { title, body }, sound: "default", badge: 1, contentAvailable: true } },
+        headers: { "apns-priority": "10", "apns-push-type": "alert" },
+      },
+      webpush: {
+        notification: {
+          title, body,
+          icon: "https://hy3n-rider.web.app/hy3n-icon-192.png",
+          badge: "https://hy3n-rider.web.app/hy3n-icon-192.png",
+          tag,
+          requireInteraction: newStatus === "driver_arrived",
+          vibrate: [200, 100, 200],
+          data: { ride_id: rideId, status: newStatus, action_url: "https://hy3n-rider.web.app/" },
+          actions: [{ action: "open", title: "Open App" }],
+        } as any,
+        fcmOptions: { link: "https://hy3n-rider.web.app/" },
+      },
+    };
+
+    try {
+      const msgId = await admin.messaging().send(message);
+      console.log(`[FCM] ✅ Sent to rider ${riderId} for ${newStatus}. ID: ${msgId}`);
+      return { success: true };
+    } catch (err: any) {
+      if (err.code === "messaging/registration-token-not-registered") {
+        console.warn(`[FCM] Stale token for ${riderId} — clearing`);
+        if (profileDocId) await db.collection("rider_profiles").doc(profileDocId).update({ fcm_token: null });
+      } else {
+        console.error("[FCM] Send error:", err);
+      }
+      return null;
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// onRideCompleted — Email Receipt
+// Fires when a ride transitions to "completed".
+// Sends a formatted HTML email receipt to the rider via Gmail SMTP (or any
+// SMTP configured in environment variables).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildReceiptHtml(ride: any, riderEmail: string): string {
+  const fare = ride.final_fare || ride.fare_estimate || 0;
+  const date = ride.completed_at
+    ? new Date(ride.completed_at).toLocaleString("en-GH", {
+        timeZone: "Africa/Accra",
+        year: "numeric", month: "long", day: "numeric",
+        hour: "2-digit", minute: "2-digit",
+      })
+    : new Date().toLocaleString("en-GH", { timeZone: "Africa/Accra" });
+
+  const paymentLabels: Record<string, string> = {
+    mobile_money: "Mobile Money", cash: "Cash", card: "Card", wallet: "HY3N Wallet",
+  };
+  const payment = paymentLabels[ride.payment_method] || ride.payment_method || "Cash";
+  const category = ride.category ? ride.category.charAt(0).toUpperCase() + ride.category.slice(1) : "Standard";
+  const distText = ride.actual_distance_km ? `${Number(ride.actual_distance_km).toFixed(1)} km` : (ride.distance_km ? `${ride.distance_km} km` : "—");
+  const durText = ride.duration_min ? `${ride.duration_min} min` : "—";
+  const driverName = ride.driver_name || "Your Driver";
+  const vehicle = [ride.vehicle_color, ride.vehicle_make, ride.vehicle_model].filter(Boolean).join(" ");
+  const plate = ride.license_plate || "";
+
+  const baseFare = ride.fare_estimate || fare;
+  const waitingFee = ride.waiting_fee || 0;
+  const tip = ride.tip_amount || 0;
+  const promo = ride.promo_discount || 0;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HY3N Ride Receipt</title></head>
+<body style="margin:0;padding:0;background:#0f0f0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#e5e5e5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;padding:24px 16px;">
+    <tr><td>
+      <!-- Header -->
+      <div style="text-align:center;padding:32px 0 24px;">
+        <div style="display:inline-block;background:#f59e0b;color:#000;font-size:22px;font-weight:900;padding:10px 22px;border-radius:12px;letter-spacing:2px;">HY3N</div>
+        <p style="color:#9ca3af;font-size:13px;margin:12px 0 0;">Your ride receipt</p>
+      </div>
+
+      <!-- Big Fare -->
+      <div style="background:#1a1a1a;border-radius:20px;padding:32px 24px;text-align:center;margin-bottom:16px;border:1px solid #2a2a2a;">
+        <p style="color:#9ca3af;font-size:13px;margin:0 0 8px;text-transform:uppercase;letter-spacing:1px;">Total Fare</p>
+        <p style="font-size:56px;font-weight:900;color:#f59e0b;margin:0;line-height:1;">GH&#8373;${Math.round(fare)}</p>
+        <p style="color:#6b7280;font-size:13px;margin:10px 0 0;">${payment} &middot; ${category}</p>
+      </div>
+
+      <!-- Date -->
+      <p style="color:#6b7280;font-size:12px;text-align:center;margin:0 0 20px;">${date}</p>
+
+      <!-- Route -->
+      <div style="background:#1a1a1a;border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid #2a2a2a;">
+        <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:16px;">
+          <div style="display:flex;flex-direction:column;align-items:center;padding-top:4px;">
+            <div style="width:10px;height:10px;border-radius:50%;background:#22c55e;"></div>
+            <div style="width:2px;height:32px;background:#374151;margin:4px 0;"></div>
+            <div style="width:10px;height:10px;border-radius:50%;background:#f59e0b;"></div>
+          </div>
+          <div style="flex:1;">
+            <p style="color:#9ca3af;font-size:10px;text-transform:uppercase;margin:0 0 2px;">Pickup</p>
+            <p style="font-size:14px;font-weight:500;margin:0 0 16px;">${ride.pickup_address || "Pickup location"}</p>
+            <p style="color:#9ca3af;font-size:10px;text-transform:uppercase;margin:0 0 2px;">Drop-off</p>
+            <p style="font-size:14px;font-weight:500;margin:0;">${ride.destination_address || "Destination"}</p>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;border-top:1px solid #2a2a2a;padding-top:16px;">
+          <div style="flex:1;text-align:center;background:#111;border-radius:10px;padding:10px;">
+            <p style="font-size:15px;font-weight:700;margin:0;">${distText}</p>
+            <p style="color:#6b7280;font-size:11px;margin:2px 0 0;">Distance</p>
+          </div>
+          <div style="flex:1;text-align:center;background:#111;border-radius:10px;padding:10px;">
+            <p style="font-size:15px;font-weight:700;margin:0;">${durText}</p>
+            <p style="color:#6b7280;font-size:11px;margin:2px 0 0;">Duration</p>
+          </div>
+          <div style="flex:1;text-align:center;background:#111;border-radius:10px;padding:10px;">
+            <p style="font-size:15px;font-weight:700;color:#f59e0b;margin:0;">GH&#8373;${Math.round(fare)}</p>
+            <p style="color:#6b7280;font-size:11px;margin:2px 0 0;">Fare</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Fare Breakdown -->
+      <div style="background:#1a1a1a;border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid #2a2a2a;">
+        <p style="color:#9ca3af;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 14px;">Fare Breakdown</p>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;">
+          <span style="color:#9ca3af;">Base fare (${category})</span><span>GH&#8373;${Math.round(baseFare)}</span>
+        </div>
+        ${waitingFee > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;"><span style="color:#9ca3af;">Waiting fee</span><span style="color:#f59e0b;">GH&#8373;${Math.round(waitingFee)}</span></div>` : ""}
+        ${tip > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;"><span style="color:#9ca3af;">Tip</span><span>GH&#8373;${Math.round(tip)}</span></div>` : ""}
+        ${promo > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:14px;"><span style="color:#9ca3af;">Promo discount</span><span style="color:#22c55e;">-GH&#8373;${Math.round(promo)}</span></div>` : ""}
+        <div style="border-top:1px solid #2a2a2a;padding-top:12px;display:flex;justify-content:space-between;font-size:16px;font-weight:700;">
+          <span>Total</span><span style="color:#f59e0b;">GH&#8373;${Math.round(fare)}</span>
+        </div>
+      </div>
+
+      <!-- Driver -->
+      <div style="background:#1a1a1a;border-radius:16px;padding:20px;margin-bottom:24px;border:1px solid #2a2a2a;">
+        <p style="color:#9ca3af;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px;">Your Driver</p>
+        <p style="font-size:16px;font-weight:700;margin:0 0 4px;">${driverName}</p>
+        ${vehicle ? `<p style="color:#9ca3af;font-size:13px;margin:0;">${vehicle}${plate ? ` &middot; ${plate}` : ""}</p>` : ""}
+      </div>
+
+      <!-- Footer -->
+      <div style="text-align:center;padding-bottom:32px;">
+        <p style="color:#4b5563;font-size:12px;margin:0;">Thank you for riding with HY3N!</p>
+        <p style="color:#374151;font-size:11px;margin:8px 0 0;">This is an automated receipt. Please do not reply to this email.</p>
+      </div>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+export const onRideCompleted = functions.firestore
+  .document("rides/{rideId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data();
+    const after = change.after.data();
+    const rideId = context.params.rideId;
+
+    // Only fire when status transitions TO "completed"
+    if (before?.status === "completed" || after?.status !== "completed") return null;
+
+    console.log(`[Receipt] Ride ${rideId} completed — sending email receipt`);
+
+    // Get rider email from Firebase Auth
+    const riderId = after.user_id || after.rider_id;
+    if (!riderId) { console.warn("[Receipt] No rider ID"); return null; }
+
+    let riderEmail: string | null = null;
+    let riderName = after.rider_name || "Rider";
+    try {
+      const userRecord = await admin.auth().getUser(riderId);
+      riderEmail = userRecord.email || null;
+      riderName = userRecord.displayName || riderName;
+    } catch (err) {
+      console.warn("[Receipt] Could not get rider auth record:", err);
+    }
+
+    if (!riderEmail) {
+      // Try rider_profiles
+      try {
+        const snap = await db.collection("rider_profiles").where("user_id", "==", riderId).limit(1).get();
+        if (!snap.empty) riderEmail = snap.docs[0].data().email || null;
+      } catch {}
+    }
+
+    if (!riderEmail) {
+      console.warn(`[Receipt] No email for rider ${riderId} — skipping`);
+      return null;
+    }
+
+    const htmlBody = buildReceiptHtml(after, riderEmail);
+    const subject = `Your HY3N Ride Receipt — GH₵${Math.round(after.final_fare || after.fare_estimate || 0)}`;
+
+    // Send via Gmail SMTP using nodemailer
+    const smtpUser = process.env.SMTP_USER || "hy3ntransportservices@gmail.com";
+    const smtpPass = process.env.SMTP_PASS || "skah tmdn wkmw xeba";
+    const smtpHost = "smtp.gmail.com";
+    const smtpPort = 465;
+
+    try {
+      const nodemailer = require("nodemailer");
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: true,
+        auth: { user: smtpUser, pass: smtpPass },
+      });
+      await transporter.sendMail({
+        from: `"HY3N Transport" <${smtpUser}>`,
+        to: riderEmail,
+        subject,
+        html: htmlBody,
+      });
+      console.log(`[Receipt] ✅ Email sent to ${riderEmail} for ride ${rideId}`);
+    } catch (err: any) {
+      console.error("[Receipt] Email send error:", err.message);
+    }
+
+    // Mark receipt as sent in Firestore
+    await change.after.ref.update({ receipt_sent: true, receipt_sent_at: new Date().toISOString() }).catch(() => {});
+    return null;
+  });
+
+// ─────────────────────────────────────────────
+// 16. sendSupportReplyNotification
+// Sends a push notification to the user (rider/driver) when an admin replies to their ticket.
+// ─────────────────────────────────────────────
+export const sendSupportReplyNotification = functions.https.onRequest(async (req, res) => {
+  if (handleOptions(req, res)) return;
+  setCors(req, res);
+  try {
+    const { ticketId, replyText } = req.body;
+    if (!ticketId || !replyText) {
+      res.status(400).json({ error: "ticketId and replyText are required" });
+      return;
+    }
+
+    const ticketSnap = await db.collection("SupportTicket").doc(ticketId).get();
+    if (!ticketSnap.exists) {
+      res.status(404).json({ error: "Support ticket not found" });
+      return;
+    }
+
+    const ticket = ticketSnap.data()!;
+    let userId: string | undefined;
+    let userType: "rider" | "driver" | undefined;
+
+    if (ticket.from_rider_id) {
+      userId = ticket.from_rider_id;
+      userType = "rider";
+    } else if (ticket.from_driver_id) {
+      userId = ticket.from_driver_id;
+      userType = "driver";
+    }
+
+    if (!userId || !userType) {
+      console.warn(`[SupportReply] No user ID found for ticket ${ticketId}`);
+      res.status(400).json({ error: "No associated rider or driver found for this ticket" });
+      return;
+    }
+
+    const userRef = db.collection(userType === "rider" ? "Rider" : "Driver").doc(userId);
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+      console.warn(`[SupportReply] User ${userId} (${userType}) not found`);
+      res.status(404).json({ error: `Associated ${userType} not found` });
+      return;
+    }
+
+    const userData = userSnap.data()!;
+    const fcmToken = userData.fcm_token;
+
+    if (!fcmToken) {
+      console.warn(`[SupportReply] No FCM token for ${userType} ${userId}`);
+      res.json({ success: true, message: `No FCM token for ${userType}. Notification not sent.` });
+      return;
+    }
+
+    const title = "HY3N Support Reply";
+    const body = `Your ticket \"${ticket.subject}\" has a new reply: ${replyText.substring(0, 70)}...`;
+
+    const message: admin.messaging.Message = {
+      token: fcmToken,
+      notification: { title, body },
+      data: {
+        type: "support_reply",
+        ticket_id: ticketId,
+        subject: ticket.subject,
+        reply: replyText,
+      },
+      android: {
+        notification: { channelId: "hy3n_support", priority: "high", defaultVibrateTimings: true, defaultSound: true },
+      },
+      apns: {
+        payload: {
+          aps: { sound: "default" },
+        },
+      },
+    };
+
+    try {
+      const msgId = await admin.messaging().send(message);
+      console.log(`[SupportReply] ✅ Sent to ${userType} ${userId} for ticket ${ticketId}. ID: ${msgId}`);
+      res.json({ success: true, message: "Notification sent successfully" });
+    } catch (err: any) {
+      if (err.code === "messaging/registration-token-not-registered") {
+        console.warn(`[SupportReply] Stale token for ${userType} ${userId} — clearing`);
+        await userRef.update({ fcm_token: admin.firestore.FieldValue.delete() });
+      }
+      console.error("[SupportReply] Send error:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+
+  } catch (err: any) {
+    console.error("sendSupportReplyNotification error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
