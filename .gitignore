@@ -1,0 +1,7 @@
+node_modules/
+lib/
+service-account.json
+*.key
+*.pem
+.env
+.env.*
