@@ -1309,6 +1309,8 @@ export const onRideStatusChange = functions.firestore
         vehicle_make: after.vehicle_make || "",
         vehicle_model: after.vehicle_model || "",
         license_plate: after.license_plate || "",
+        // Include pickup OTP so the rider can see it in the push notification
+        pickup_code: after.pickup_code ? String(after.pickup_code) : "",
       },
       android: {
         priority: "high",
@@ -1632,5 +1634,81 @@ export const sendSupportReplyNotification = functions.https.onRequest(async (req
   } catch (err: any) {
     console.error("sendSupportReplyNotification error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. checkRideSafety (Ride Check)
+// Scheduled function that runs every 5 minutes to check for "in_progress" rides
+// that haven't moved or updated their location in over 5 minutes.
+// Sends a safety check-in notification to the rider if a stall is detected.
+// ─────────────────────────────────────────────────────────────────────────────
+export const checkRideSafety = functions.pubsub.schedule("every 5 minutes").onRun(async (context) => {
+  const fiveMinAgo = admin.firestore.Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
+  
+  try {
+    // Find rides that are in progress
+    const ridesSnap = await db.collection("Ride")
+      .where("status", "==", "in_progress")
+      .get();
+
+    if (ridesSnap.empty) return null;
+
+    const safetyChecks = ridesSnap.docs.map(async (doc) => {
+      const ride = doc.data();
+      const rideId = doc.id;
+      
+      // Check if the last location update was more than 5 minutes ago
+      // or if the driver's current location hasn't changed (if we tracked history)
+      // For now, we check the 'updated_at' timestamp on the ride
+      const lastUpdate = ride.updated_at || ride.trip_started_at;
+      if (!lastUpdate) return;
+
+      const lastUpdateTime = typeof lastUpdate === "string" 
+        ? new Date(lastUpdate).getTime() 
+        : lastUpdate.toMillis();
+
+      if (Date.now() - lastUpdateTime > 5 * 60 * 1000) {
+        // Trip appears stalled. Send safety check-in to rider.
+        const riderId = ride.user_id || ride.rider_id;
+        if (!riderId) return;
+
+        // Get rider's FCM token
+        const profileSnap = await db.collection("rider_profiles").where("user_id", "==", riderId).limit(1).get();
+        if (profileSnap.empty) return;
+        
+        const fcmToken = profileSnap.docs[0].data().fcm_token;
+        if (!fcmToken) return;
+
+        const title = "Safety Check-in";
+        const body = "We noticed your trip has stopped for a while. Is everything okay?";
+        
+        const message: admin.messaging.Message = {
+          token: fcmToken,
+          notification: { title, body },
+          data: {
+            type: "safety_check",
+            ride_id: rideId,
+            tag: "hy3n-safety-check",
+          },
+          android: {
+            priority: "high",
+            notification: { channelId: "hy3n_safety", priority: "high", defaultVibrateTimings: true, defaultSound: true },
+          },
+          apns: {
+            payload: { aps: { alert: { title, body }, sound: "default" } },
+          },
+        };
+
+        await admin.messaging().send(message);
+        console.log(`[Safety] Sent check-in to rider ${riderId} for stalled ride ${rideId}`);
+      }
+    });
+
+    await Promise.all(safetyChecks);
+    return { success: true };
+  } catch (err) {
+    console.error("checkRideSafety error:", err);
+    return null;
   }
 });
