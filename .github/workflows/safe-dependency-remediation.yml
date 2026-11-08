@@ -1,0 +1,39 @@
+name: Safe dependency remediation
+
+on:
+  push:
+    branches: ["chore/safe-dependency-remediation"]
+
+permissions:
+  contents: write
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/safe-dependency-remediation
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install current locked dependencies
+        run: npm ci
+      - name: Apply non-breaking security updates only
+        run: npm audit fix --package-lock-only
+      - name: Reinstall from updated lockfile
+        run: npm ci
+      - name: TypeScript build
+        run: npm run build
+      - name: ESLint
+        run: npm run lint
+      - name: Re-audit production dependencies
+        id: audit
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+      - name: Commit updated lockfile
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(security): apply safe dependency updates"
+          file_pattern: package-lock.json
