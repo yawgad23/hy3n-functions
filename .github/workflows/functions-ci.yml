@@ -23,3 +23,6 @@ jobs:
       - name: Production dependency audit (report-only)
         run: npm audit --omit=dev --audit-level=high
         continue-on-error: true
+      - name: CI completion
+        if: always()
+        run: echo "TypeScript build and ESLint are required; dependency audit is reported separately."
