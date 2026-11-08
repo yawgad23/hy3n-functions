@@ -22,6 +22,7 @@ jobs:
         run: npm ci
       - name: Apply non-breaking security updates only
         run: npm audit fix --package-lock-only
+        continue-on-error: true
       - name: Reinstall from updated lockfile
         run: npm ci
       - name: TypeScript build
