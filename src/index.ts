@@ -1721,8 +1721,12 @@ export const checkRideSafety = functions.pubsub.schedule("every 5 minutes").onRu
 // ─────────────────────────────────────────────
 type RoadEtaDriver = { id: string; lat: number; lng: number };
 const roadEtaCache = new Map<string, { etaMinutes: number; expiresAt: number }>();
+const roadEtaUserThrottle = new Map<string, number>();
 
-export const getDriverRoadEtas = functions.https.onRequest(async (req, res) => {
+// Bind the Google Routes credential from Secret Manager at function runtime.
+export const getDriverRoadEtas = functions.runWith({
+  secrets: ["GOOGLE_MAPS_API_KEY"],
+}).https.onRequest(async (req, res) => {
   if (handleOptions(req, res)) return;
   setCors(req, res);
   if (req.method !== "POST") {
@@ -1737,7 +1741,15 @@ export const getDriverRoadEtas = functions.https.onRequest(async (req, res) => {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    await admin.auth().verifyIdToken(token);
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    const userId = decodedToken.uid;
+    const now = Date.now();
+    const lastRequestAt = roadEtaUserThrottle.get(userId) || 0;
+    if (now - lastRequestAt < 15000) {
+      res.status(429).json({ error: "Please wait before requesting another pickup ETA" });
+      return;
+    }
+    roadEtaUserThrottle.set(userId, now);
 
     const pickup = req.body?.pickup;
     const drivers = req.body?.drivers;
@@ -1768,7 +1780,6 @@ export const getDriverRoadEtas = functions.https.onRequest(async (req, res) => {
       return;
     }
 
-    const now = Date.now();
     const results: Record<string, number> = {};
     const uncached: RoadEtaDriver[] = [];
     for (const driver of uniqueDrivers) {
