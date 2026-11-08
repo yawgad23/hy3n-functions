@@ -1743,14 +1743,6 @@ export const getDriverRoadEtas = functions.runWith({
     }
     const decodedToken = await admin.auth().verifyIdToken(token);
     const userId = decodedToken.uid;
-    const now = Date.now();
-    const lastRequestAt = roadEtaUserThrottle.get(userId) || 0;
-    if (now - lastRequestAt < 15000) {
-      res.status(429).json({ error: "Please wait before requesting another pickup ETA" });
-      return;
-    }
-    roadEtaUserThrottle.set(userId, now);
-
     const pickup = req.body?.pickup;
     const drivers = req.body?.drivers;
     const validCoordinate = (point: any) =>
@@ -1760,6 +1752,19 @@ export const getDriverRoadEtas = functions.runWith({
     if (!validCoordinate(pickup) || !Array.isArray(drivers) || drivers.length > 10) {
       res.status(400).json({ error: "Valid pickup and up to 10 driver coordinates are required" });
       return;
+    }
+
+    const now = Date.now();
+    const lastRequestAt = roadEtaUserThrottle.get(userId) || 0;
+    if (now - lastRequestAt < 15000) {
+      res.status(429).json({ error: "Please wait before requesting another pickup ETA" });
+      return;
+    }
+    roadEtaUserThrottle.set(userId, now);
+    if (roadEtaUserThrottle.size > 1000) {
+      for (const [id, requestedAt] of roadEtaUserThrottle) {
+        if (requestedAt < now - 60000) roadEtaUserThrottle.delete(id);
+      }
     }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
