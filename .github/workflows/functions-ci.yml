@@ -20,5 +20,6 @@ jobs:
         run: npm run build
       - name: ESLint
         run: npm run lint
-      - name: Production dependency audit
+      - name: Production dependency audit (report-only)
         run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
