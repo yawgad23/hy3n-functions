@@ -1712,3 +1712,157 @@ export const checkRideSafety = functions.pubsub.schedule("every 5 minutes").onRu
     return null;
   }
 });
+
+
+// ─────────────────────────────────────────────
+// Live road-based pickup ETAs for Rider nearby-driver preview.
+// The Google Routes API key remains server-side. Clients submit only the
+// latest eligible nearby-driver coordinates already returned by the API.
+// ─────────────────────────────────────────────
+type RoadEtaDriver = { id: string; lat: number; lng: number };
+const roadEtaCache = new Map<string, { etaMinutes: number; expiresAt: number }>();
+const roadEtaUserThrottle = new Map<string, number>();
+
+// Bind the Google Routes credential from Secret Manager at function runtime.
+export const getDriverRoadEtas = functions.runWith({
+  secrets: ["GOOGLE_MAPS_API_KEY"],
+}).https.onRequest(async (req, res) => {
+  if (handleOptions(req, res)) return;
+  setCors(req, res);
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "POST required" });
+    return;
+  }
+
+  try {
+    const authorization = String(req.headers.authorization || "");
+    const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (!token) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    const userId = decodedToken.uid;
+    const pickup = req.body?.pickup;
+    const drivers = req.body?.drivers;
+    const validCoordinate = (point: any) =>
+      point && Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lng))
+      && Math.abs(Number(point.lat)) <= 90 && Math.abs(Number(point.lng)) <= 180;
+
+    if (!validCoordinate(pickup) || !Array.isArray(drivers) || drivers.length > 10) {
+      res.status(400).json({ error: "Valid pickup and up to 10 driver coordinates are required" });
+      return;
+    }
+
+    const now = Date.now();
+    const lastRequestAt = roadEtaUserThrottle.get(userId) || 0;
+    if (now - lastRequestAt < 15000) {
+      res.status(429).json({ error: "Please wait before requesting another pickup ETA" });
+      return;
+    }
+    roadEtaUserThrottle.set(userId, now);
+    if (roadEtaUserThrottle.size > 1000) {
+      for (const [id, requestedAt] of roadEtaUserThrottle) {
+        if (requestedAt < now - 60000) roadEtaUserThrottle.delete(id);
+      }
+    }
+
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) {
+      res.status(503).json({ error: "Road ETA service is not configured" });
+      return;
+    }
+
+    const uniqueDrivers: RoadEtaDriver[] = drivers.filter((driver: any) =>
+      typeof driver?.id === "string" && driver.id.length > 0 && validCoordinate(driver)
+    ).map((driver: any) => ({
+      id: driver.id,
+      lat: Number(driver.lat),
+      lng: Number(driver.lng),
+    }));
+    if (!uniqueDrivers.length) {
+      res.json({ etas: {}, calculatedAt: new Date().toISOString() });
+      return;
+    }
+
+    const results: Record<string, number> = {};
+    const uncached: RoadEtaDriver[] = [];
+    for (const driver of uniqueDrivers) {
+      const cacheKey = [
+        driver.id,
+        driver.lat.toFixed(3),
+        driver.lng.toFixed(3),
+        Number(pickup.lat).toFixed(4),
+        Number(pickup.lng).toFixed(4),
+      ].join(":");
+      const cached = roadEtaCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        results[driver.id] = cached.etaMinutes;
+      } else {
+        uncached.push(driver);
+      }
+    }
+
+    if (uncached.length) {
+      const response = await axios.post(
+        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+        {
+          origins: uncached.map((driver) => ({
+            waypoint: { location: { latLng: { latitude: driver.lat, longitude: driver.lng } } },
+          })),
+          destinations: [{
+            waypoint: { location: { latLng: { latitude: Number(pickup.lat), longitude: Number(pickup.lng) } } },
+          }],
+          travelMode: "DRIVE",
+          routingPreference: "TRAFFIC_AWARE_OPTIMAL",
+          regionCode: "GH",
+          languageCode: "en",
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": apiKey,
+            "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+          },
+          timeout: 12000,
+        },
+      );
+
+      const elements = Array.isArray(response.data) ? response.data : [];
+      for (const element of elements) {
+        const driver = uncached[Number(element.originIndex)];
+        if (!driver || element.condition !== "ROUTE_EXISTS" || typeof element.duration !== "string") continue;
+        const seconds = Number(element.duration.replace(/s$/, ""));
+        if (!Number.isFinite(seconds) || seconds <= 0) continue;
+        const etaMinutes = Math.max(1, Math.ceil(seconds / 60));
+        results[driver.id] = etaMinutes;
+        const cacheKey = [
+          driver.id,
+          driver.lat.toFixed(3),
+          driver.lng.toFixed(3),
+          Number(pickup.lat).toFixed(4),
+          Number(pickup.lng).toFixed(4),
+        ].join(":");
+        roadEtaCache.set(cacheKey, { etaMinutes, expiresAt: now + 15000 });
+      }
+    }
+
+    // Bound the in-memory cache so warm function instances cannot grow forever.
+    for (const [key, value] of roadEtaCache) {
+      if (value.expiresAt <= now) roadEtaCache.delete(key);
+    }
+    if (roadEtaCache.size > 500) {
+      const oldestKeys = Array.from(roadEtaCache.keys()).slice(0, roadEtaCache.size - 500);
+      oldestKeys.forEach((key) => roadEtaCache.delete(key));
+    }
+
+    res.json({ etas: results, calculatedAt: new Date().toISOString() });
+  } catch (err: any) {
+    console.error("getDriverRoadEtas error:", err?.response?.data || err);
+    if (err?.code === "auth/id-token-expired" || err?.code === "auth/argument-error") {
+      res.status(401).json({ error: "Authentication expired" });
+      return;
+    }
+    res.status(502).json({ error: "Unable to calculate road-based pickup ETAs" });
+  }
+});
